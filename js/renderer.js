@@ -1,100 +1,117 @@
 "use strict";
 
-window.Renderer={
+/*
+=========================================================
+ SkyReader Renderer
+ Version 2.0
+ PDF.js Rendering Engine
 
-pdf:null,
+ Responsibilities
 
-currentBook:null,
+ • Load PDF documents
+ • Render pages to canvas
+ • Manage page cache
+ • Resize viewer
+ • Provide page navigation API
+ • Render PDF hyperlinks
 
-currentPage:1,
+ No UI.
+ No buttons.
+ No audio.
+ No gestures.
 
-pageCount:0,
+=========================================================
+*/
 
-pageRatio:1,
+window.Renderer=(function(){
 
-renderScale:2,
+const renderer={};
 
-canvasPool:[],
+/*-------------------------------------------------------
+  Internal State
+-------------------------------------------------------*/
 
-cache:new Map(),
+let pdf=null;
 
-renderQueue:[],
+let currentBook=null;
 
-rendering:false,
+let currentPage=1;
 
-viewer:null,
+let pageCount=0;
 
-container:null,
+let pageRatio=1;
 
-callbacks:{
+let renderScale=2;
 
-onProgress:null,
+let viewer=null;
 
-onReady:null,
+let pageContainer=null;
 
-onPageRendered:null,
+let canvas=null;
 
-onError:null
+let ctx=null;
 
-},
+let cache=new Map();
 
-initialize(){
+let rendering=false;
 
-this.viewer=document.getElementById("viewerArea");
+let pendingPage=null;
 
-this.container=document.getElementById("pageContainer");
+let resizeObserver=null;
 
-this.createCanvasPool();
+let currentViewport=null;
 
-window.addEventListener(
+/*-------------------------------------------------------
+  Events
+-------------------------------------------------------*/
 
-"resize",
+renderer.events={
 
-()=>{
+progress:null,
 
-this.resize();
+ready:null,
 
-}
+page:null,
+
+error:null
+
+};
+
+/*-------------------------------------------------------
+  Initialization
+-------------------------------------------------------*/
+
+renderer.initialize=function(){
+
+viewer=document.getElementById("viewerArea");
+
+pageContainer=document.getElementById("pageContainer");
+
+if(!viewer){
+
+throw new Error(
+
+"viewerArea not found."
 
 );
 
-},
+}
 
-createCanvasPool(){
+if(!pageContainer){
 
-this.canvasPool=[];
+throw new Error(
 
-this.container.innerHTML="";
+"pageContainer not found."
 
-for(let i=0;i<3;i++){
+);
 
-const canvas=document.createElement("canvas");
+}
+
+canvas=document.createElement("canvas");
 
 canvas.className="pageCanvas";
 
-canvas.width=1;
-
-canvas.height=1;
-
-canvas.style.display=
-
-i===1
-
-?
-
-"block"
-
-:
-
-"none";
-
-this.container.appendChild(canvas);
-
-this.canvasPool.push({
-
-canvas,
-
-ctx:canvas.getContext(
+ctx=canvas.getContext(
 
 "2d",
 
@@ -106,27 +123,99 @@ desynchronized:true
 
 }
 
-),
+);
 
-page:null
+pageContainer.innerHTML="";
+
+pageContainer.appendChild(canvas);
+
+resizeObserver=
+
+new ResizeObserver(()=>{
+
+renderer.resize();
 
 });
 
+resizeObserver.observe(viewer);
+
+};
+
+/*-------------------------------------------------------
+  Public Information
+-------------------------------------------------------*/
+
+renderer.page=function(){
+
+return currentPage;
+
+};
+
+renderer.pages=function(){
+
+return pageCount;
+
+};
+
+renderer.book=function(){
+
+return currentBook;
+
+};
+
+renderer.loaded=function(){
+
+return pdf!==null;
+
+};
+
+/*-------------------------------------------------------
+  Events
+-------------------------------------------------------*/
+
+function emit(name,...args){
+
+const fn=renderer.events[name];
+
+if(typeof fn==="function"){
+
+fn(...args);
+
 }
 
-},
+}
 
-async open(book){
+function progress(percent,text){
 
-this.clear();
+emit(
 
-this.currentBook=book;
+"progress",
 
-this.emitProgress(
+percent,
+
+text
+
+);
+
+}
+
+/*-------------------------------------------------------
+  Document Loading
+-------------------------------------------------------*/
+
+renderer.open=
+
+async function(book){
+
+renderer.close();
+
+currentBook=book;
+
+progress(
 
 5,
 
-"Opening PDF..."
+"Opening document"
 
 );
 
@@ -140,25 +229,23 @@ url:book.pdf,
 
 enableXfa:false,
 
-useSystemFonts:true,
-
-isEvalSupported:true
+useSystemFonts:true
 
 });
 
-this.pdf=
+pdf=
 
 await task.promise;
 
-this.pageCount=
+pageCount=
 
-this.pdf.numPages;
+pdf.numPages;
 
 const first=
 
-await this.pdf.getPage(1);
+await pdf.getPage(1);
 
-const viewport=
+currentViewport=
 
 first.getViewport({
 
@@ -166,48 +253,72 @@ scale:1
 
 });
 
-this.pageRatio=
+pageRatio=
 
-viewport.width/
+currentViewport.width/
 
-viewport.height;
+currentViewport.height;
 
-this.currentPage=1;
+currentPage=1;
 
-this.resize();
+renderer.resize();
 
-this.emitReady();
+emit(
+
+"ready",
+
+book,
+
+pageCount
+
+);
+
+await renderer.render(1);
 
 }
-catch(err){
+catch(error){
 
-this.emitError(err);
+emit(
+
+"error",
+
+error
+
+);
 
 }
 
-},
+};
 
-resize(){
+/*-------------------------------------------------------
+  Resize
+-------------------------------------------------------*/
+
+renderer.resize=function(){
 
 if(
 
-!this.viewer||
+!viewer||
 
-!this.pageRatio
+!pageRatio
 
-)return;
+){
+
+return;
+
+}
 
 const padding=24;
 
 const maxWidth=
 
-this.viewer.clientWidth-
+viewer.clientWidth-
 
 padding*2;
 
 const maxHeight=
 
-this.viewer.clientHeight-
+viewer.clientHeight-
 
 padding*2;
 
@@ -215,9 +326,7 @@ let width=maxWidth;
 
 let height=
 
-width/
-
-this.pageRatio;
+width/pageRatio;
 
 if(height>maxHeight){
 
@@ -225,51 +334,45 @@ height=maxHeight;
 
 width=
 
-height*
-
-this.pageRatio;
+height*pageRatio;
 
 }
 
-this.container.style.width=
+pageContainer.style.width=
 
 width+"px";
 
-this.container.style.height=
+pageContainer.style.height=
 
 height+"px";
 
-this.canvasPool.forEach(slot=>{
-
-slot.canvas.style.width=
+canvas.style.width=
 
 width+"px";
 
-slot.canvas.style.height=
+canvas.style.height=
 
 height+"px";
 
-});
+};
 
-},
+/*-------------------------------------------------------
+  Page Cache
+-------------------------------------------------------*/
 
-async getPage(number){
+async function getPage(number){
 
-if(
+if(cache.has(number)){
 
-this.cache.has(number)
-
-){
-
-return this.cache.get(number);
+return cache.get(number);
 
 }
 
 const page=
 
-await this.pdf.getPage(number);
+await pdf.getPage(number);
 
-this.cache.set(
+cache.set(
 
 number,
 
@@ -279,129 +382,61 @@ page
 
 return page;
 
-},
-
-queue(pageNumber){
-
-if(
-
-pageNumber<1||
-
-pageNumber>
-
-this.pageCount
-
-){
-
-return;
-
 }
 
-if(
+/*-------------------------------------------------------
+  Rendering
+-------------------------------------------------------*/
 
-this.renderQueue.includes(
+renderer.render=async function(pageNumber){
+
+if(!pdf)return;
+
+pageNumber=Math.max(
+
+1,
+
+Math.min(
+
+pageCount,
 
 pageNumber
 
 )
 
-){
+);
+
+pendingPage=pageNumber;
+
+if(rendering){
 
 return;
 
 }
 
-this.renderQueue.push(
+rendering=true;
 
-pageNumber
+while(pendingPage!==null){
 
-);
+const target=pendingPage;
 
-this.processQueue();
+pendingPage=null;
 
-},
-
-async processQueue(){
-
-if(
-
-this.rendering
-
-)return;
-
-if(
-
-!this.renderQueue.length
-
-)return;
-
-this.rendering=true;
-
-const next=
-
-this.renderQueue.shift();
-
-await this.renderPage(next);
-
-this.rendering=false;
-
-if(
-
-this.renderQueue.length
-
-){
-
-this.processQueue();
+await renderInternal(target);
 
 }
 
-},
+rendering=false;
 
-async renderPage(pageNumber){
+};
 
-if(!this.pdf)return;
+async function renderInternal(pageNumber){
 
-try{
-
-const page=
-
-await this.getPage(pageNumber);
-
-const viewport=
-
-page.getViewport({
-
-scale:this.renderScale
-
-});
-
-const slot=
-
-this.getAvailableCanvas();
-
-slot.page=pageNumber;
-
-slot.canvas.width=viewport.width;
-
-slot.canvas.height=viewport.height;
-
-slot.ctx.clearRect(
-
-0,
-
-0,
-
-slot.canvas.width,
-
-slot.canvas.height
-
-);
-
-this.emitProgress(
+progress(
 
 Math.round(
 
-(pageNumber/this.pageCount)*100
+(pageNumber/pageCount)*100
 
 ),
 
@@ -409,128 +444,19 @@ Math.round(
 
 );
 
-await page.render({
-
-canvasContext:slot.ctx,
-
-viewport
-
-}).promise;
-
-await this.renderAnnotations(
-
-page,
-
-viewport,
-
-slot.canvas
-
-);
-
-this.showCanvas(slot);
-
-this.emitPageRendered(pageNumber);
-
-this.prefetch(pageNumber);
-
-}
-catch(err){
-
-this.emitError(err);
-
-}
-
-},
-
-getAvailableCanvas(){
-
-let candidate=this.canvasPool.find(
-
-c=>c.page===null
-
-);
-
-if(candidate)return candidate;
-
-candidate=this.canvasPool.shift();
-
-this.canvasPool.push(candidate);
-
-return candidate;
-
-},
-
-showCanvas(active){
-
-this.canvasPool.forEach(slot=>{
-
-slot.canvas.style.display=
-
-slot===active
-
-?
-
-"block"
-
-:
-
-"none";
-
-});
-
-},
-
-async prefetch(pageNumber){
-
-const targets=[
-
-pageNumber-1,
-
-pageNumber+1
-
-];
-
-for(const p of targets){
-
-if(
-
-p<1||
-
-p>this.pageCount
-
-)continue;
-
-if(
-
-this.cache.has("render_"+p)
-
-)continue;
-
-this.renderPreview(p);
-
-}
-
-},
-
-async renderPreview(pageNumber){
-
-try{
-
 const page=
 
-await this.getPage(pageNumber);
+await getPage(pageNumber);
 
 const viewport=
 
 page.getViewport({
 
-scale:1
+scale:renderScale
 
 });
 
-const canvas=
-
-document.createElement("canvas");
+currentViewport=viewport;
 
 canvas.width=
 
@@ -540,152 +466,91 @@ canvas.height=
 
 viewport.height;
 
+ctx.setTransform(
+
+1,
+
+0,
+
+0,
+
+1,
+
+0,
+
+0
+
+);
+
+ctx.clearRect(
+
+0,
+
+0,
+
+canvas.width,
+
+canvas.height
+
+);
+
 await page.render({
 
-canvasContext:
-
-canvas.getContext("2d"),
+canvasContext:ctx,
 
 viewport
 
 }).promise;
 
-this.cache.set(
+currentPage=pageNumber;
 
-"render_"+pageNumber,
+renderer.resize();
 
-canvas
-
-);
-
-}
-catch(err){
-
-console.warn(err);
-
-}
-
-},
-
-renderCurrent(){
-
-this.queue(
-
-this.currentPage
-
-);
-
-},
-
-next(){
-
-if(
-
-this.currentPage>=
-
-this.pageCount
-
-)return;
-
-this.currentPage++;
-
-this.renderCurrent();
-
-},
-
-previous(){
-
-if(
-
-this.currentPage<=1
-
-)return;
-
-this.currentPage--;
-
-this.renderCurrent();
-
-},
-
-goTo(page){
-
-page=Math.max(
-
-1,
-
-Math.min(
+await renderLinks(
 
 page,
 
-this.pageCount
-
-)
+viewport
 
 );
 
-if(
+trimCache();
 
-page===this.currentPage
+emit(
 
-)return;
+"page",
 
-this.currentPage=page;
+currentPage,
 
-this.renderCurrent();
-
-},
-
-refresh(){
-
-this.renderCurrent();
-
-},
-
-statistics(){
-
-return{
-
-pages:this.pageCount,
-
-cachedPages:
-
-this.cache.size,
-
-queue:
-
-this.renderQueue.length,
-
-canvasPool:
-
-this.canvasPool.length,
-
-currentPage:
-
-this.currentPage
-
-};
-
-},
-
-renderAnnotations(page,viewport,canvas){
-
-const old=
-
-this.container.querySelectorAll(
-
-".pdfLink"
+pageCount
 
 );
 
-old.forEach(link=>link.remove());
+}
 
-page.getAnnotations().then(
+/*-------------------------------------------------------
+  Hyperlinks
+-------------------------------------------------------*/
 
-annotations=>{
+async function renderLinks(page,viewport){
 
-annotations.forEach(a=>{
+pageContainer
 
-if(a.subtype!=="Link")return;
+.querySelectorAll(".pdfLink")
+
+.forEach(link=>link.remove());
+
+const annotations=
+
+await page.getAnnotations();
+
+for(const annotation of annotations){
+
+if(annotation.subtype!=="Link"){
+
+continue;
+
+}
 
 const link=
 
@@ -697,304 +562,400 @@ link.style.position="absolute";
 
 link.style.left=
 
-((a.rect[0]/viewport.width)*100)+"%";
+(annotation.rect[0]/viewport.width*100)+"%";
 
 link.style.top=
 
-(((viewport.height-a.rect[3])/
+((viewport.height-
 
-viewport.height)*100)+"%";
+annotation.rect[3])
+
+/
+
+viewport.height
+
+*100)+"%";
 
 link.style.width=
 
-(((a.rect[2]-a.rect[0])/
+((annotation.rect[2]-annotation.rect[0])
 
-viewport.width)*100)+"%";
+/
+
+viewport.width
+
+*100)+"%";
 
 link.style.height=
 
-(((a.rect[3]-a.rect[1])/
+((annotation.rect[3]-annotation.rect[1])
 
-viewport.height)*100)+"%";
+/
 
-link.style.zIndex="100";
+viewport.height
+
+*100)+"%";
 
 link.style.cursor="pointer";
 
 link.style.background="transparent";
 
-if(a.url){
+link.style.zIndex="100";
 
-link.href=a.url;
+if(annotation.url){
+
+link.href=annotation.url;
 
 link.target="_blank";
 
 }
 
-else if(a.dest){
+else if(annotation.dest){
 
 link.href="#";
 
-link.onclick=async(e)=>{
+link.onclick=async event=>{
 
-e.preventDefault();
-
-try{
+event.preventDefault();
 
 const destination=
 
-await this.pdf.getDestination(a.dest);
+await pdf.getDestination(
 
-if(!destination)return;
+annotation.dest
 
-const ref=
+);
 
-destination[0];
+if(!destination){
+
+return;
+
+}
 
 const pageIndex=
 
-await this.pdf.getPageIndex(ref);
+await pdf.getPageIndex(
 
-this.goTo(pageIndex+1);
+destination[0]
 
-}
-catch(err){
+);
 
-console.warn(err);
+renderer.goTo(
 
-}
+pageIndex+1
+
+);
 
 };
 
 }
 
-this.container.appendChild(link);
-
-});
+pageContainer.appendChild(link);
 
 }
 
-);
-
-},
-
-emitProgress(percent,message){
-
-if(
-
-typeof this.callbacks.onProgress===
-
-"function"
-
-){
-
-this.callbacks.onProgress(
-
-percent,
-
-message
-
-);
-
 }
 
-},
+/*-------------------------------------------------------
+  Cache
+-------------------------------------------------------*/
 
-emitReady(){
-
-if(
-
-typeof this.callbacks.onReady===
-
-"function"
-
-){
-
-this.callbacks.onReady(
-
-this.pdf,
-
-this.pageCount
-
-);
-
-}
-
-},
-
-emitPageRendered(page){
-
-if(
-
-typeof this.callbacks.onPageRendered===
-
-"function"
-
-){
-
-this.callbacks.onPageRendered(
-
-page
-
-);
-
-}
-
-},
-
-emitError(error){
-
-console.error(error);
-
-if(
-
-typeof this.callbacks.onError===
-
-"function"
-
-){
-
-this.callbacks.onError(
-
-error
-
-);
-
-}
-
-},
-
-trimCache(){
+function trimCache(){
 
 const keep=[
 
-this.currentPage-2,
+currentPage-2,
 
-this.currentPage-1,
+currentPage-1,
 
-this.currentPage,
+currentPage,
 
-this.currentPage+1,
+currentPage+1,
 
-this.currentPage+2
+currentPage+2
 
 ];
 
-for(const key of this.cache.keys()){
+for(const key of cache.keys()){
 
-if(typeof key!=="number")
+if(
 
-continue;
+!keep.includes(key)
 
-if(!keep.includes(key)){
+){
 
-this.cache.delete(key);
+cache.delete(key);
+
+}
 
 }
 
 }
 
-},
 
-closeDocument(){
+/*-------------------------------------------------------
+  Navigation
+-------------------------------------------------------*/
 
-this.renderQueue=[];
+renderer.next=function(){
 
-this.rendering=false;
+if(!pdf)return;
 
-this.cache.clear();
+if(currentPage>=pageCount)return;
 
-this.currentBook=null;
+renderer.render(currentPage+1);
 
-this.currentPage=1;
+};
 
-this.pageCount=0;
+renderer.previous=function(){
 
-this.pageRatio=1;
+if(!pdf)return;
 
-this.pdf=null;
+if(currentPage<=1)return;
 
-this.canvasPool.forEach(slot=>{
+renderer.render(currentPage-1);
 
-slot.page=null;
+};
 
-slot.ctx.clearRect(
+renderer.goTo=function(page){
+
+if(!pdf)return;
+
+page=Math.max(
+
+1,
+
+Math.min(
+
+page,
+
+pageCount
+
+)
+
+);
+
+renderer.render(page);
+
+};
+
+/*-------------------------------------------------------
+  Public Utilities
+-------------------------------------------------------*/
+
+renderer.refresh=function(){
+
+if(!pdf)return;
+
+renderer.render(currentPage);
+
+};
+
+renderer.statistics=function(){
+
+return{
+
+book:currentBook,
+
+currentPage,
+
+pageCount,
+
+cachedPages:cache.size,
+
+renderScale,
+
+rendering
+
+};
+
+};
+
+/*-------------------------------------------------------
+  Cleanup
+-------------------------------------------------------*/
+
+renderer.close=function(){
+
+pendingPage=null;
+
+rendering=false;
+
+cache.clear();
+
+currentBook=null;
+
+currentPage=1;
+
+pageCount=0;
+
+pageRatio=1;
+
+currentViewport=null;
+
+if(pdf){
+
+try{
+
+pdf.destroy();
+
+}catch(e){}
+
+}
+
+pdf=null;
+
+pageContainer
+
+.querySelectorAll(".pdfLink")
+
+.forEach(link=>link.remove());
+
+if(ctx){
+
+ctx.setTransform(
+
+1,
 
 0,
 
 0,
 
-slot.canvas.width,
+1,
 
-slot.canvas.height
+0,
 
-);
-
-});
-
-const links=
-
-this.container.querySelectorAll(
-
-".pdfLink"
+0
 
 );
 
-links.forEach(
+ctx.clearRect(
 
-l=>l.remove()
+0,
 
-);
+0,
 
-},
+canvas.width,
 
-destroy(){
-
-this.closeDocument();
-
-this.container.innerHTML="";
-
-this.canvasPool=[];
-
-},
-
-setCallbacks(callbacks={}){
-
-Object.assign(
-
-this.callbacks,
-
-callbacks
+canvas.height
 
 );
 
-},
+}
 
-getCurrentPage(){
+canvas.width=1;
 
-return this.currentPage;
+canvas.height=1;
 
-},
+};
 
-getPageCount(){
+renderer.destroy=function(){
 
-return this.pageCount;
+renderer.close();
 
-},
+if(resizeObserver){
 
-getCurrentBook(){
+resizeObserver.disconnect();
 
-return this.currentBook;
+resizeObserver=null;
 
-},
+}
 
-isLoaded(){
+if(canvas&&canvas.parentNode){
 
-return this.pdf!==null;
+canvas.parentNode.removeChild(canvas);
+
+}
+
+canvas=null;
+
+ctx=null;
+
+viewer=null;
+
+pageContainer=null;
+
+};
+
+/*-------------------------------------------------------
+  Event Registration
+-------------------------------------------------------*/
+
+renderer.on=function(name,callback){
+
+if(
+
+Object.prototype.hasOwnProperty.call(
+
+renderer.events,
+
+name
+
+)
+
+){
+
+renderer.events[name]=callback;
+
+}
+
+return renderer;
+
+};
+
+/*-------------------------------------------------------
+  Configuration
+-------------------------------------------------------*/
+
+renderer.setRenderScale=function(scale){
+
+scale=Math.max(
+
+1,
+
+Math.min(
+
+4,
+
+Number(scale)||2
+
+)
+
+);
+
+renderScale=scale;
+
+if(pdf){
+
+renderer.refresh();
 
 }
 
 };
+
+renderer.getRenderScale=function(){
+
+return renderScale;
+
+};
+
+/*-------------------------------------------------------
+  Version
+-------------------------------------------------------*/
+
+renderer.version="2.0.0";
+
+/*-------------------------------------------------------
+  Export
+-------------------------------------------------------*/
+
+return renderer;
+
+})();
+
+/*-------------------------------------------------------
+  Automatic Initialization
+-------------------------------------------------------*/
 
 document.addEventListener(
 
